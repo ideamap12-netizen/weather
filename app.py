@@ -153,34 +153,86 @@ def convert_korean_city(city):
     # 일치하는 것이 없으면 원래 입력값 반환 (영어 도시명일 수도 있음)
     return city
 
-def get_current_location():
+def get_current_location(override_city=None):
     """
     사용자의 현재 위치 정보를 가져옵니다.
+    override_city가 제공되면 해당 도시의 좌표를 사용합니다.
     """
+    # 한국 주요 도시 좌표 매핑
+    korean_city_coords = {
+        '서울': {'lat': 37.5665, 'lon': 126.9780},
+        '부산': {'lat': 35.1796, 'lon': 129.0756},
+        '인천': {'lat': 37.4563, 'lon': 126.7052},
+        '대구': {'lat': 35.8714, 'lon': 128.6014},
+        '대전': {'lat': 36.3504, 'lon': 127.3845},
+        '광주': {'lat': 35.1595, 'lon': 126.8526},
+        '울산': {'lat': 35.5384, 'lon': 129.3114},
+        '수원': {'lat': 37.2636, 'lon': 127.0286},
+        '고양': {'lat': 37.6584, 'lon': 126.8320},
+        '용인': {'lat': 37.2411, 'lon': 127.1776},
+        '성남': {'lat': 37.4449, 'lon': 127.1388},
+        '청주': {'lat': 36.6424, 'lon': 127.4890},
+        '천안': {'lat': 36.8151, 'lon': 127.1139},
+        '전주': {'lat': 35.8242, 'lon': 127.1480},
+        '춘천': {'lat': 37.8813, 'lon': 127.7298},
+        '제주': {'lat': 33.4996, 'lon': 126.5312},
+        '포항': {'lat': 36.0190, 'lon': 129.3435},
+        '창원': {'lat': 35.2281, 'lon': 128.6811}
+    }
+    
+    # 사용자가 특정 도시를 지정한 경우
+    if override_city and override_city in korean_city_coords:
+        coords = korean_city_coords[override_city]
+        return {
+            'lat': coords['lat'],
+            'lon': coords['lon'],
+            'city': override_city,
+            'country': 'KR',
+            'detected': True  # 수동 선택은 정확한 위치로 간주
+        }
+    
     try:
-        g = geocoder.ip('me')
-        if g.ok:
-            return {
-                'lat': g.latlng[0],
-                'lon': g.latlng[1],
-                'city': g.city,
-                'country': g.country
-            }
-        else:
-            # 기본값으로 서울 좌표 설정
-            return {
-                'lat': 37.5665,
-                'lon': 126.9780,
-                'city': '서울',
-                'country': 'KR'
-            }
-    except Exception as e:
-        st.error(f"위치 정보를 가져오는데 실패했습니다: {e}")
+        # 여러 위치 서비스를 시도
+        location_services = [
+            lambda: geocoder.ip('me'),
+            lambda: geocoder.freegeoip('me'),
+            lambda: geocoder.ipinfo('me')
+        ]
+        
+        for service in location_services:
+            try:
+                g = service()
+                if g.ok and g.latlng:
+                    # 한국 좌표 범위 확인 (대략적인 범위)
+                    lat, lon = g.latlng
+                    # 한국 좌표 범위: 위도 33-43, 경도 124-132
+                    if 33 <= lat <= 43 and 124 <= lon <= 132:
+                        return {
+                            'lat': lat,
+                            'lon': lon,
+                            'city': g.city or '알 수 없음',
+                            'country': g.country or 'KR',
+                            'detected': True
+                        }
+            except:
+                continue
+        
+        # 모든 서비스 실패 시 기본값(서울) 사용
         return {
             'lat': 37.5665,
             'lon': 126.9780,
             'city': '서울',
-            'country': 'KR'
+            'country': 'KR',
+            'detected': False
+        }
+        
+    except Exception as e:
+        return {
+            'lat': 37.5665,
+            'lon': 126.9780,
+            'city': '서울',
+            'country': 'KR',
+            'detected': False
         }
 
 def get_weather_by_coordinates(lat, lon):
@@ -444,11 +496,38 @@ def main():
         
         with tab1:
             st.subheader("📍 내 위치 날씨")
-            if st.button("🎯 현재 위치 날씨 보기", type="primary", key="current_location_btn"):
-                st.session_state.use_current_location = True
-                st.session_state.city = None
             
-            st.info("📱 IP 기반 위치 정보를 사용합니다")
+            # 위치 설정 방법 선택
+            location_method = st.radio(
+                "위치 설정 방법",
+                ["🎯 자동 감지 (IP 기반)", "🏙️ 수동 선택"],
+                key="location_method"
+            )
+            
+            if location_method == "🏙️ 수동 선택":
+                st.write("**정확한 위치를 선택해주세요:**")
+                manual_city = st.selectbox(
+                    "내 위치",
+                    ["서울", "부산", "인천", "대구", "대전", "광주", "울산", "수원", 
+                     "고양", "용인", "성남", "청주", "천안", "전주", "춘천", "제주", "포항", "창원"],
+                    key="manual_city_select"
+                )
+                
+                if st.button("📍 선택한 위치 날씨 보기", type="primary", key="manual_location_btn"):
+                    st.session_state.use_current_location = True
+                    st.session_state.manual_city = manual_city
+                    st.session_state.city = None
+            else:
+                if st.button("🎯 현재 위치 날씨 보기", type="primary", key="current_location_btn"):
+                    st.session_state.use_current_location = True
+                    st.session_state.manual_city = None
+                    st.session_state.city = None
+            
+            if location_method == "🎯 자동 감지 (IP 기반)":
+                st.info("📱 IP 기반 위치 정보를 사용합니다")
+                st.caption("⚠️ IP 위치가 부정확할 수 있습니다. 부정확한 경우 '수동 선택'을 이용하세요.")
+            else:
+                st.success("✅ 수동으로 선택한 위치를 사용합니다")
         
         with tab2:
             # 도시 입력
@@ -507,13 +586,23 @@ def main():
     
     # 현재 위치 사용
     if st.session_state.get('use_current_location', False):
-        with st.spinner("현재 위치의 날씨 정보를 가져오는 중..."):
-            location_info = get_current_location()
+        # 수동 선택된 도시가 있는지 확인
+        manual_city = st.session_state.get('manual_city', None)
+        
+        with st.spinner("위치 날씨 정보를 가져오는 중..."):
+            location_info = get_current_location(manual_city)
             weather_data = get_weather_by_coordinates(location_info['lat'], location_info['lon'])
             forecast_data = get_weekly_forecast(location_info['lat'], location_info['lon'])
         
         if weather_data:
-            st.success(f"📍 현재 위치: {location_info['city']}, {location_info['country']}")
+            # 위치 표시 메시지 개선
+            if manual_city:
+                st.success(f"📍 선택한 위치: {location_info['city']} (수동 선택)")
+            else:
+                if location_info['city'] == '서울' and location_info.get('detected', False) == False:
+                    st.warning(f"📍 기본 위치: {location_info['city']} (자동 감지 실패로 기본값 사용)")
+                else:
+                    st.success(f"📍 감지된 위치: {location_info['city']} (자동 감지)")
             
             # 메인 날씨 정보와 주간 예보를 탭으로 구분
             tab1, tab2 = st.tabs(["🌤️ 현재 날씨", "📅 주간 예보"])
