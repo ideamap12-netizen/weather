@@ -2,9 +2,12 @@ import streamlit as st
 import requests
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from dotenv import load_dotenv
+import geocoder
+import folium
+from streamlit_folium import st_folium
 
 # 환경변수 로드
 load_dotenv()
@@ -18,8 +21,13 @@ st.set_page_config(
 )
 
 # OpenWeather API 설정
-API_KEY = os.getenv("OPENWEATHER_API_KEY", "your_api_key_here")
+# Streamlit Secrets 우선, 없으면 환경변수 사용
+try:
+    API_KEY = st.secrets["OPENWEATHER_API_KEY"]
+except KeyError:
+    API_KEY = os.getenv("OPENWEATHER_API_KEY", "your_api_key_here")
 BASE_URL = "http://api.openweathermap.org/data/2.5/weather"
+FORECAST_URL = "http://api.openweathermap.org/data/2.5/forecast"
 
 # 한국 도시 한글-영어 매핑 딕셔너리
 KOREAN_CITIES = {
@@ -145,6 +153,76 @@ def convert_korean_city(city):
     # 일치하는 것이 없으면 원래 입력값 반환 (영어 도시명일 수도 있음)
     return city
 
+def get_current_location():
+    """
+    사용자의 현재 위치 정보를 가져옵니다.
+    """
+    try:
+        g = geocoder.ip('me')
+        if g.ok:
+            return {
+                'lat': g.latlng[0],
+                'lon': g.latlng[1],
+                'city': g.city,
+                'country': g.country
+            }
+        else:
+            # 기본값으로 서울 좌표 설정
+            return {
+                'lat': 37.5665,
+                'lon': 126.9780,
+                'city': '서울',
+                'country': 'KR'
+            }
+    except Exception as e:
+        st.error(f"위치 정보를 가져오는데 실패했습니다: {e}")
+        return {
+            'lat': 37.5665,
+            'lon': 126.9780,
+            'city': '서울',
+            'country': 'KR'
+        }
+
+def get_weather_by_coordinates(lat, lon):
+    """
+    좌표를 사용하여 날씨 정보를 가져옵니다.
+    """
+    params = {
+        "lat": lat,
+        "lon": lon,
+        "appid": API_KEY,
+        "units": "metric",
+        "lang": "kr"
+    }
+    
+    try:
+        response = requests.get(BASE_URL, params=params, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        st.error(f"현재 위치의 날씨 정보를 가져오는데 실패했습니다: {e}")
+        return None
+
+def get_weekly_forecast(lat, lon):
+    """
+    5일간의 일기예보를 가져옵니다. (3시간 간격)
+    """
+    params = {
+        "lat": lat,
+        "lon": lon,
+        "appid": API_KEY,
+        "units": "metric",
+        "lang": "kr"
+    }
+    
+    try:
+        response = requests.get(FORECAST_URL, params=params, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        st.error(f"주간 예보를 가져오는데 실패했습니다: {e}")
+        return None
+
 def get_weather_data(city):
     """
     OpenWeather API를 사용하여 도시의 날씨 정보를 가져옵니다.
@@ -256,6 +334,98 @@ def format_weather_display(weather_data):
     with col2:
         st.write(f"🌇 **일몰**: {sunset.strftime('%H:%M:%S')}")
 
+def format_weekly_forecast(forecast_data):
+    """
+    5일간 예보 데이터를 보기 좋게 포맷하여 표시합니다.
+    """
+    if not forecast_data or "list" not in forecast_data:
+        st.error("주간 예보 데이터를 가져올 수 없습니다.")
+        return
+    
+    st.header("📅 5일간 날씨 예보")
+    
+    forecast_list = forecast_data["list"]
+    
+    # 날짜별로 데이터를 그룹화
+    daily_forecasts = {}
+    for item in forecast_list:
+        date_str = datetime.fromtimestamp(item["dt"]).strftime('%Y-%m-%d')
+        if date_str not in daily_forecasts:
+            daily_forecasts[date_str] = []
+        daily_forecasts[date_str].append(item)
+    
+    # 처음 5일만 표시
+    for i, (date_str, day_items) in enumerate(list(daily_forecasts.items())[:5]):
+        date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+        
+        # 해당 날의 온도 범위 계산
+        temps = [item["main"]["temp"] for item in day_items]
+        temp_max = max(temps)
+        temp_min = min(temps)
+        
+        # 대표 날씨 (가장 많이 나오는 날씨 또는 첫 번째)
+        weather_desc = day_items[0]["weather"][0]["description"]
+        humidity = day_items[0]["main"]["humidity"]
+        pressure = day_items[0]["main"]["pressure"]
+        wind_speed = day_items[0]["wind"]["speed"]
+        
+        # 강수 확률 (있는 경우)
+        pop = day_items[0].get("pop", 0) * 100 if "pop" in day_items[0] else 0
+        
+        # 날짜별 컨테이너
+        with st.container():
+            if i == 0:
+                st.subheader(f"🔥 오늘 ({date_obj.strftime('%m월 %d일 %a')})")
+            elif i == 1:
+                st.subheader(f"➡️ 내일 ({date_obj.strftime('%m월 %d일 %a')})")
+            else:
+                st.subheader(f"📆 {date_obj.strftime('%m월 %d일 %a')}")
+            
+            # 온도와 날씨 정보를 컬럼으로 분할
+            col1, col2, col3, col4 = st.columns([2, 2, 2, 2])
+            
+            with col1:
+                st.metric(
+                    "🌡️ 최고/최저 온도",
+                    f"{temp_max:.1f}°C",
+                    f"최저 {temp_min:.1f}°C"
+                )
+            
+            with col2:
+                st.metric(
+                    "☁️ 날씨",
+                    weather_desc,
+                    f"습도 {humidity}%"
+                )
+            
+            with col3:
+                st.metric(
+                    "🌬️ 바람/기압",
+                    f"{wind_speed:.1f} m/s",
+                    f"{pressure} hPa"
+                )
+            
+            with col4:
+                st.metric(
+                    "☔ 강수확률",
+                    f"{pop:.0f}%",
+                    f"{len(day_items)}개 예보"
+                )
+            
+            # 시간대별 상세 정보
+            with st.expander(f"📊 {date_obj.strftime('%m월 %d일')} 시간대별 상세 예보"):
+                cols = st.columns(min(len(day_items), 4))
+                for j, item in enumerate(day_items[:4]):  # 최대 4개만 표시
+                    time_obj = datetime.fromtimestamp(item["dt"])
+                    with cols[j % 4]:
+                        st.write(f"**{time_obj.strftime('%H:%M')}**")
+                        st.write(f"🌡️ {item['main']['temp']:.1f}°C")
+                        st.write(f"☁️ {item['weather'][0]['description']}")
+                        if "pop" in item:
+                            st.write(f"☔ {item['pop']*100:.0f}%")
+            
+            st.divider()
+
 def main():
     """
     메인 애플리케이션 함수
@@ -267,58 +437,121 @@ def main():
     
     # 사이드바
     with st.sidebar:
-        st.header("🏙️ 도시 선택")
+        st.header("� 날씨 조회 방법")
         
-        # 도시 입력
-        city = st.text_input(
-            "도시명을 입력하세요",
-            placeholder="예: 서울, 부산, 인천, 대전, 춘천",
-            help="한글 또는 영문 도시명을 입력해주세요"
-        )
+        # 탭으로 구분
+        tab1, tab2 = st.tabs(["📍 현재 위치", "�🏙️ 도시 선택"])
         
-        # 한국 주요 도시 버튼
-        st.subheader("�🇷 한국 주요 도시")
-        korean_major_cities = ["서울", "부산", "인천", "대구", "대전", "광주", "울산", "수원", "고양", "용인"]
+        with tab1:
+            st.subheader("📍 내 위치 날씨")
+            if st.button("🎯 현재 위치 날씨 보기", type="primary", key="current_location_btn"):
+                st.session_state.use_current_location = True
+                st.session_state.city = None
+            
+            st.info("📱 IP 기반 위치 정보를 사용합니다")
         
-        cols = st.columns(2)
-        for i, kor_city in enumerate(korean_major_cities):
-            with cols[i % 2]:
-                if st.button(kor_city, key=f"kor_city_{i}"):
-                    city = kor_city
+        with tab2:
+            # 도시 입력
+            city = st.text_input(
+                "도시명을 입력하세요",
+                placeholder="예: 서울, 부산, 인천, 대전, 춘천",
+                help="한글 또는 영문 도시명을 입력해주세요"
+            )
         
-        # 지역별 도시 선택
-        st.subheader("🗺️ 지역별 도시")
-        
-        regions = {
-            "수도권": ["서울", "인천", "고양", "수원", "성남", "용인", "안양", "부천", "안산", "김포"],
-            "강원도": ["춘천", "원주", "강릉", "속초", "동해", "태백", "삼척"],
-            "충청도": ["대전", "청주", "천안", "충주", "제천", "공주", "보령", "아산", "서산", "논산"],
-            "전라도": ["광주", "전주", "목포", "여수", "순천", "군산", "익산", "정읍", "남원", "김제"],
-            "경상도": ["부산", "대구", "울산", "포항", "경주", "안동", "구미", "창원", "진주", "김해"],
-            "제주도": ["제주", "서귀포"]
-        }
-        
-        selected_region = st.selectbox("지역을 선택하세요", ["선택안함"] + list(regions.keys()))
-        
-        if selected_region != "선택안함":
-            region_cities = regions[selected_region]
+            # 한국 주요 도시 버튼
+            st.subheader("🇰🇷 한국 주요 도시")
+            korean_major_cities = ["서울", "부산", "인천", "대구", "대전", "광주", "울산", "수원", "고양", "용인"]
+            
             cols = st.columns(2)
-            for i, region_city in enumerate(region_cities):
+            for i, kor_city in enumerate(korean_major_cities):
                 with cols[i % 2]:
-                    if st.button(region_city, key=f"region_city_{selected_region}_{i}"):
-                        city = region_city
+                    if st.button(kor_city, key=f"kor_city_{i}"):
+                        city = kor_city
+                        st.session_state.use_current_location = False
+        
+            # 지역별 도시 선택
+            st.subheader("🗺️ 지역별 도시")
+            
+            regions = {
+                "수도권": ["서울", "인천", "고양", "수원", "성남", "용인", "안양", "부천", "안산", "김포"],
+                "강원도": ["춘천", "원주", "강릉", "속초", "동해", "태백", "삼척"],
+                "충청도": ["대전", "청주", "천안", "충주", "제천", "공주", "보령", "아산", "서산", "논산"],
+                "전라도": ["광주", "전주", "목포", "여수", "순천", "군산", "익산", "정읍", "남원", "김제"],
+                "경상도": ["부산", "대구", "울산", "포항", "경주", "안동", "구미", "창원", "진주", "김해"],
+                "제주도": ["제주", "서귀포"]
+            }
+            
+            selected_region = st.selectbox("지역을 선택하세요", ["선택안함"] + list(regions.keys()))
+            
+            if selected_region != "선택안함":
+                region_cities = regions[selected_region]
+                cols = st.columns(2)
+                for i, region_city in enumerate(region_cities):
+                    with cols[i % 2]:
+                        if st.button(region_city, key=f"region_city_{selected_region}_{i}"):
+                            city = region_city
+                            st.session_state.use_current_location = False
         
         # 새로고침 버튼
         if st.button("🔄 새로고침", type="primary"):
             st.rerun()
     
+    # session_state 초기화
+    if 'use_current_location' not in st.session_state:
+        st.session_state.use_current_location = False
+    
     # 메인 컨텐츠
-    if city:
-        with st.spinner(f"{city}의 날씨 정보를 가져오는 중..."):
-            weather_data = get_weather_data(city)
+    weather_data = None
+    forecast_data = None
+    location_info = None
+    
+    # 현재 위치 사용
+    if st.session_state.get('use_current_location', False):
+        with st.spinner("현재 위치의 날씨 정보를 가져오는 중..."):
+            location_info = get_current_location()
+            weather_data = get_weather_by_coordinates(location_info['lat'], location_info['lon'])
+            forecast_data = get_weekly_forecast(location_info['lat'], location_info['lon'])
         
         if weather_data:
-            format_weather_display(weather_data)
+            st.success(f"📍 현재 위치: {location_info['city']}, {location_info['country']}")
+            
+            # 메인 날씨 정보와 주간 예보를 탭으로 구분
+            tab1, tab2 = st.tabs(["🌤️ 현재 날씨", "📅 주간 예보"])
+            
+            with tab1:
+                format_weather_display(weather_data)
+            
+            with tab2:
+                if forecast_data:
+                    format_weekly_forecast(forecast_data)
+                else:
+                    st.error("주간 예보 정보를 가져올 수 없습니다.")
+        else:
+            st.error("현재 위치의 날씨 정보를 가져올 수 없습니다.")
+    
+    # 도시 검색 사용
+    elif city:
+        with st.spinner(f"{city}의 날씨 정보를 가져오는 중..."):
+            weather_data = get_weather_data(city)
+            
+            # 도시의 좌표를 얻어서 주간 예보도 가져오기
+            if weather_data and 'coord' in weather_data:
+                lat = weather_data['coord']['lat']
+                lon = weather_data['coord']['lon']
+                forecast_data = get_weekly_forecast(lat, lon)
+        
+        if weather_data:
+            # 메인 날씨 정보와 주간 예보를 탭으로 구분
+            tab1, tab2 = st.tabs(["🌤️ 현재 날씨", "📅 주간 예보"])
+            
+            with tab1:
+                format_weather_display(weather_data)
+            
+            with tab2:
+                if forecast_data:
+                    format_weekly_forecast(forecast_data)
+                else:
+                    st.error("주간 예보 정보를 가져올 수 없습니다.")
         else:
             st.error("날씨 정보를 가져올 수 없습니다. 도시명을 확인해주세요.")
     else:
@@ -333,10 +566,13 @@ def main():
         st.write("4. 실시간 날씨 정보가 표시됩니다!")
         
         st.subheader("🌟 지원 기능")
-        st.write("✅ 전국 모든 시/도 날씨 조회")
-        st.write("✅ 한글 도시명 완벽 지원")
-        st.write("✅ 실시간 온도, 습도, 바람 정보")
-        st.write("✅ 일출/일몰 시간 표시")
+        st.write("✅ 📍 현재 위치 자동 인식")
+        st.write("✅ 🏙️ 전국 모든 시/도 날씨 조회")
+        st.write("✅ 🔤 한글 도시명 완벽 지원")
+        st.write("✅ 🌡️ 실시간 온도, 습도, 바람 정보")
+        st.write("✅ 🌅 일출/일몰 시간 표시")
+        st.write("✅ 📅 7일간 주간 예보")
+        st.write("✅ ☔ 강수확률 및 UV 지수")
         
         # 현재 시간 표시
         current_time = datetime.now(pytz.timezone('Asia/Seoul'))
